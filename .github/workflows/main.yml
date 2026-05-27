@@ -1,0 +1,91 @@
+# .github/workflows/build-ipk.yml
+# 用于编译 arenekosreal/luci-app-nginx 的工作流
+name: Build OpenWrt IPK (luci-app-nginx)
+
+on:
+  push:                    # 当代码推送到 main 或 master 分支时自动触发
+    branches: [ main, master ]
+  workflow_dispatch:       # 允许在 GitHub 网页上手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 检出你的插件仓库
+      - name: Checkout luci-app-nginx
+        uses: actions/checkout@v4
+        with:
+          repository: arenekosreal/luci-app-nginx
+          path: luci-app-nginx
+
+      # 2. 下载并准备 OpenWrt SDK (以 x86_64 架构为例)
+      - name: Download and prepare OpenWrt SDK
+        run: |
+          # --- 可修改区域 ---
+          # 目标 OpenWrt 版本和架构，请根据你的路由器修改
+          VERSION="24.10.6"
+          TARGET="x86/64"
+          # -----------------
+          SDK_URL="https://downloads.openwrt.org/releases/${VERSION}/targets/${TARGET}/openwrt-sdk-${VERSION}-${TARGET/\//-}_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          echo "SDK URL: $SDK_URL"
+          
+          # 下载和解压 SDK
+          wget "$SDK_URL" -O sdk.tar.zst
+          mkdir sdk
+          # 下载后
+          tar -I zstd -xf sdk.tar.zst -C sdk --strip-components=1
+          
+          # 将你的插件软链接到 SDK 的 package 目录
+          ln -sf $GITHUB_WORKSPACE/luci-app-nginx sdk/package/luci-app-nginx
+          
+          echo "SDK_DIR=$GITHUB_WORKSPACE/sdk" >> $GITHUB_ENV
+
+      # 3. 配置 feeds 并启用插件
+      - name: Configure OpenWrt feeds and enable package
+        run: |
+          cd ${{ env.SDK_DIR }}
+          
+          # 更新 feeds
+          for i in 1 2 3; do
+            ./scripts/feeds update -a && break || sleep 15
+          done
+          ./scripts/feeds install -a
+          
+          # 设置插件为编译为模块 (.ipk)
+          echo "CONFIG_PACKAGE_luci-app-nginx=m" >> .config
+          echo "CONFIG_PACKAGE_nginx=m" >> .config
+          make defconfig
+
+      # 4. 开始编译插件
+      - name: Compile the IPK
+        run: |
+          cd ${{ env.SDK_DIR }}
+          make package/luci-app-nginx/compile V=s
+
+      # 5. 查找并打包所有生成的 .ipk 文件
+      - name: Locate and package IPKs
+        run: |
+          cd ${{ env.SDK_DIR }}
+          # 创建一个目录来存放所有 .ipk 文件
+          mkdir -p ipk_output
+          # 查找所有以 .ipk 结尾的文件并复制到 ipk_output 目录
+          find bin/ -name "*.ipk" -exec cp {} ipk_output/ \;
+          # 同时复制 ipk_output 到 GitHub 工作空间，方便上传
+          cp -r ipk_output $GITHUB_WORKSPACE/
+
+      # 6. 上传编译好的 .ipk 文件作为 Artifacts (保留30天)
+      - name: Upload IPK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-nginx-ipks
+          path: ${{ github.workspace }}/ipk_output/*.ipk
+          retention-days: 30
+
+      # 7. (可选) 创建 Release 并上传 .ipk 文件
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            ${{ github.workspace }}/ipk_output/*.ipk
+          generate_release_notes: true
